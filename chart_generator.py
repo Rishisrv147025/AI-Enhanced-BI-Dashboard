@@ -6,10 +6,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.impute import SimpleImputer
 import re
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
+# Set device (GPU if available, else CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load spaCy model for text preprocessing
 nlp = spacy.load("en_core_web_sm")
@@ -20,8 +20,108 @@ chart_labels = [
     "areachart", "violin", "sunburst", "treemap", "funnel", "density_heatmap", "density_contour", "clustered_column"
 ]
 
-def generate_chart(action, df, user_columns=None, highlight_values=None):
-    """Generates charts based on the specified action and data."""
+# Enhanced Text Preprocessing
+def preprocess_text(text):
+    """Preprocesses input text by removing stop words, punctuation, and lemmatizing."""
+    doc = nlp(text.lower())
+    return [token.lemma_ for token in doc if not token.is_stop and not token.is_punct and not token.is_space]
+
+def extract_entities(text):
+    """Extracts entities from the text that might be relevant for chart generation."""
+    doc = nlp(text.lower())
+    return [ent.text for ent in doc.ents]
+
+# Enhanced Feature Extraction
+def extract_ngrams(tokens, n=2):
+    """Extracts n-grams from the tokenized text."""
+    return [' '.join(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+
+def extract_pos_tags(tokens):
+    """Extracts POS tags from the tokenized text."""
+    doc = nlp(' '.join(tokens))
+    return [token.pos_ for token in doc]
+
+# Enhanced Dataset Preparation
+class EnhancedChartDataset(Dataset):
+    """Enhanced dataset with n-grams and POS tags."""
+    def __init__(self, prompts, labels, vocab, max_len=50):
+        self.prompts = prompts
+        self.labels = labels
+        self.vocab = vocab
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.prompts)
+
+    def __getitem__(self, idx):
+        prompt = self.prompts[idx]
+        label = self.labels[idx]
+        tokens = preprocess_text(prompt)
+        ngrams = extract_ngrams(tokens)
+        pos_tags = extract_pos_tags(tokens)
+        all_tokens = tokens + ngrams + pos_tags
+        indexed_tokens = [self.vocab.get(token, self.vocab["<UNK>"]) for token in all_tokens]
+        indexed_tokens = indexed_tokens[:self.max_len] + [self.vocab["<PAD>"]] * (self.max_len - len(indexed_tokens))
+        return torch.tensor(indexed_tokens), torch.tensor(label)
+
+# Enhanced Model Architecture
+class EnhancedTextClassificationModel(nn.Module):
+    """Enhanced model with attention and convolutional layers."""
+    def __init__(self, vocab_size, embed_dim=100, hidden_dim=128, output_dim=15, dropout=0.5):
+        super(EnhancedTextClassificationModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.conv1 = nn.Conv1d(embed_dim, 64, kernel_size=3, padding=1)
+        self.lstm = nn.LSTM(64, hidden_dim, batch_first=True, bidirectional=True)
+        self.attention = nn.Linear(hidden_dim * 2, 1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_dim * 2, output_dim)
+
+    def forward(self, x):
+        embedded = self.embedding(x)
+        embedded = embedded.permute(0, 2, 1)  # Reshape for Conv1d
+        conv_out = self.conv1(embedded)
+        conv_out = conv_out.permute(0, 2, 1)  # Reshape back for LSTM
+        lstm_out, (hn, cn) = self.lstm(conv_out)
+        attention_weights = torch.softmax(self.attention(lstm_out), dim=1)
+        attended = torch.sum(attention_weights * lstm_out, dim=1)
+        out = self.fc(self.dropout(attended))
+        return out
+
+# Enhanced Training Loop
+def train_enhanced_model(train_dataset, vocab_size):
+    """Trains the enhanced model using the training dataset."""
+    model = EnhancedTextClassificationModel(vocab_size)
+    model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    model.train()
+    best_loss = float('inf')
+    patience = 3
+    for epoch in range(10):  # Train for 10 epochs
+        epoch_loss = 0
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        scheduler.step()
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            patience = 3
+        else:
+            patience -= 1
+            if patience == 0:
+                break
+    return model
+
+# Enhanced Chart Generation
+def generate_chart(action, df, user_columns=None, highlight_values=None, entities=None):
+    """Generates charts based on the specified action, data, and extracted entities."""
     numerical_cols = df.select_dtypes(include=['float64', 'int64']).columns
     categorical_cols = df.select_dtypes(include=['object']).columns
 
@@ -32,9 +132,13 @@ def generate_chart(action, df, user_columns=None, highlight_values=None):
     else:
         x_col, y_col = None, None
 
-    # Check for numerical and categorical columns availability
-    if len(numerical_cols) == 0 and action not in ["piechart", "sunburst", "treemap"]:
-        return
+    # Use extracted entities to suggest columns
+    if entities:
+        for entity in entities:
+            if entity in numerical_cols:
+                x_col = x_col or entity
+            elif entity in categorical_cols:
+                y_col = y_col or entity
 
     # Dynamically select columns based on the chart type
     if action == "histogram":
@@ -115,46 +219,7 @@ def generate_chart(action, df, user_columns=None, highlight_values=None):
         fig = px.bar(df, x=x_col, y=y_col)
         fig.update_layout(title="Clustered Column Chart")
 
-def preprocess_text(text):
-    """Preprocesses input text by removing stop words and punctuation."""
-    doc = nlp(text.lower())
-    return [token.text for token in doc if not token.is_stop and not token.is_punct]
-
-class ChartDataset(Dataset):
-    """Custom dataset for handling text data for model training."""
-    def __init__(self, prompts, labels, vocab, max_len=50):
-        self.prompts = prompts
-        self.labels = labels
-        self.vocab = vocab
-        self.max_len = max_len
-
-    def __len__(self):
-        return len(self.prompts)
-
-    def __getitem__(self, idx):
-        prompt = self.prompts[idx]
-        label = self.labels[idx]
-        tokens = preprocess_text(prompt)
-        indexed_tokens = [self.vocab.get(token, self.vocab["<UNK>"]) for token in tokens]
-        indexed_tokens = indexed_tokens[:self.max_len] + [self.vocab["<PAD>"]] * (self.max_len - len(indexed_tokens))
-        return torch.tensor(indexed_tokens), torch.tensor(label)
-
-class TextClassificationModel(nn.Module):
-    """Bidirectional LSTM model for text classification."""
-    def __init__(self, vocab_size, embed_dim=100, hidden_dim=128, output_dim=15, dropout=0.5):
-        super(TextClassificationModel, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim * 2, output_dim)  # Output dimension is fixed to 15 for chart labels
-
-    def forward(self, x):
-        embedded = self.embedding(x)
-        lstm_out, (hn, cn) = self.lstm(embedded)
-        final_hidden_state = torch.cat((hn[-2], hn[-1]), dim=1)  # Concatenate final states from both directions
-        out = self.fc(self.dropout(final_hidden_state))
-        return out
-
+# Prepare Dataset
 def prepare_dataset():
     """Prepares dataset for training."""
     prompts = [
@@ -170,24 +235,12 @@ def prepare_dataset():
     vocab["<PAD>"] = 0
     vocab["<UNK>"] = len(vocab)
     train_prompts, test_prompts, train_labels, test_labels = train_test_split(prompts, labels, test_size=0.2)
-    train_dataset = ChartDataset(train_prompts, train_labels, vocab)
-    test_dataset = ChartDataset(test_prompts, test_labels, vocab)
+    train_dataset = EnhancedChartDataset(train_prompts, train_labels, vocab)
+    test_dataset = EnhancedChartDataset(test_prompts, test_labels, vocab)
     return train_dataset, test_dataset, vocab
 
-def train_model(train_dataset, vocab_size):
-    """Trains the model using the training dataset."""
-    model = TextClassificationModel(vocab_size)
-    model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-    model.train()
-    for epoch in range(5):  # Train for 5 epochs
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-    return model
+# Main Execution
+if __name__ == "__main__":
+    train_dataset, test_dataset, vocab = prepare_dataset()
+    model = train_enhanced_model(train_dataset, len(vocab))
+    print("Model training complete!")
