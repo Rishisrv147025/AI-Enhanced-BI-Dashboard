@@ -238,9 +238,3 @@ def prepare_dataset():
     train_dataset = EnhancedChartDataset(train_prompts, train_labels, vocab)
     test_dataset = EnhancedChartDataset(test_prompts, test_labels, vocab)
     return train_dataset, test_dataset, vocab
-
-# Main Execution
-if __name__ == "__main__":
-    train_dataset, test_dataset, vocab = prepare_dataset()
-    model = train_enhanced_model(train_dataset, len(vocab))
-    print("Model training complete!")
